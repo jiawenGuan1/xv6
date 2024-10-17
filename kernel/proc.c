@@ -338,6 +338,34 @@ void exit(int status) {
 
   acquire(&p->lock);
 
+
+  char *states[] = {
+    "unused", "sleeping", "runnable", "running", "zombie"
+  };
+  // 打印父进程的信息
+  if(original_parent){
+    exit_info("proc %d exit, parent pid %d, name %s, state %s\n",
+                p->pid,
+                original_parent->pid,
+                original_parent->name,
+                states[original_parent->state]);
+  }
+
+  // 打印子进程的信息
+  int child_num = 0;
+  for(struct proc *child = proc; child < &proc[NPROC]; child++){
+    if(child->parent == p){
+      acquire(&child->lock);
+      exit_info("proc %d exit, child %d, pid %d, name %s, state %s\n",
+                  p->pid,
+                  child_num++,
+                  child->pid,
+                  child->name,
+                  states[child->state]);
+      release(&child->lock);
+    }
+  }
+
   // Give any children to init.
   reparent(p);
 
@@ -356,7 +384,7 @@ void exit(int status) {
 
 // Wait for a child process to exit and return its pid.
 // Return -1 if this process has no children.
-int wait(uint64 addr) {
+int wait(uint64 addr, int flags) {
   struct proc *np;
   int havekids, pid;
   struct proc *p = myproc();
@@ -396,6 +424,12 @@ int wait(uint64 addr) {
 
     // No point waiting if we don't have any children.
     if (!havekids || p->killed) {
+      release(&p->lock);
+      return -1;
+    }
+
+    // Non-blocking option: check flags
+    if(flags == 1){
       release(&p->lock);
       return -1;
     }

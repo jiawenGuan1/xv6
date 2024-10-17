@@ -104,3 +104,6 @@ struct proc {
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
 };
+
+// 在proc.h文件末尾添加extern声明全局进程表
+extern struct proc proc[NPROC];
