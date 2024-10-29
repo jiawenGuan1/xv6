@@ -18,15 +18,22 @@ struct run {
   struct run *next;
 };
 
-struct {
+struct kmem{
   struct spinlock lock;
   struct run *freelist;
-} kmem;
+};
+
+struct kmem kmems[NCPU];
+
+char lock_name[NCPU][24];
 
 void
 kinit()
 {
-  initlock(&kmem.lock, "kmem");
+  for (int i = 0; i < NCPU; i++) {
+    snprintf(lock_name[i], sizeof(lock_name[i]), "kmem%d", i);
+    initlock(&kmems[i].lock, lock_name[i]);
+  }
   freerange(end, (void*)PHYSTOP);
 }
 
@@ -56,10 +63,16 @@ kfree(void *pa)
 
   r = (struct run*)pa;
 
-  acquire(&kmem.lock);
-  r->next = kmem.freelist;
-  kmem.freelist = r;
-  release(&kmem.lock);
+  // 获取当前CPU编号
+  push_off();
+  int cpu_id = cpuid();
+  pop_off();
+
+  // 将对应的空闲页放入空闲列表中
+  acquire(&kmems[cpu_id].lock);
+  r->next = kmems[cpu_id].freelist;
+  kmems[cpu_id].freelist = r;
+  release(&kmems[cpu_id].lock);
 }
 
 // Allocate one 4096-byte page of physical memory.
@@ -70,11 +83,37 @@ kalloc(void)
 {
   struct run *r;
 
-  acquire(&kmem.lock);
-  r = kmem.freelist;
-  if(r)
-    kmem.freelist = r->next;
-  release(&kmem.lock);
+  // 获取当前CPU编号
+  push_off();
+  int cpu_id = cpuid();
+  pop_off();
+
+  acquire(&kmems[cpu_id].lock);
+  r = kmems[cpu_id].freelist;
+
+  // 如果当前CPU有空闲内存块
+  if (r) {
+    kmems[cpu_id].freelist = r->next;
+    release(&kmems[cpu_id].lock);
+  } else {  // 如果当前CPU没有空闲内存块
+    release(&kmems[cpu_id].lock);
+    for (int i = 0; i < NCPU; i++) {
+      if (i == cpu_id) continue;
+      
+      acquire(&kmems[i].lock);
+      r = kmems[i].freelist;
+      if (r) {
+        kmems[i].freelist = r->next;
+        release(&kmems[i].lock);
+        break;
+      } else {
+        release(&kmems[i].lock);
+      }
+
+      // 所有CPU都没有空闲块时，返回0
+      if (i == NCPU - 1) return 0;
+    }
+  }
 
   if(r)
     memset((char*)r, 5, PGSIZE); // fill with junk
