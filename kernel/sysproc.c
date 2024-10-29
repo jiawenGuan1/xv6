@@ -70,6 +70,7 @@ sys_sleep(void)
     sleep(&ticks, &tickslock);
   }
   release(&tickslock);
+  backtrace();  // lab4-2
   return 0;
 }
 
@@ -94,4 +95,34 @@ sys_uptime(void)
   xticks = ticks;
   release(&tickslock);
   return xticks;
+}
+
+// lab4-3
+uint64
+sys_sigreturn(void) {
+  struct proc *p = myproc();
+  // trapframe must have the copy of trapframe in user space
+  if(p->trapframecopy != p->trapframe + 512) {
+    return -1;
+  }
+  memmove(p->trapframe, p->trapframecopy, sizeof(struct trapframe));  // restore trapframe
+  p->passedticks = 0;   // reset passedticks
+  p->trapframecopy = 0;  // reset trapframecopy
+  return p->trapframe->a0;  // 返回a0，避免被返回值覆盖
+}
+
+// lab4-3
+uint64 sys_sigalarm(void) {
+  int interval;
+  uint64 handler;
+  struct proc *p;
+  // 要求时间间隔非负
+  if(argint(0, &interval) < 0 || argaddr(1, &handler) < 0 || interval < 0) {
+    return -1;
+  }
+  p = myproc();
+  p->interval = interval;
+  p->handler = handler;
+  p->passedticks = 0;   // 重置已过时间
+  return 0;
 }

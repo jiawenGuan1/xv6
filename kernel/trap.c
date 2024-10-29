@@ -76,6 +76,18 @@ usertrap(void)
   if(p->killed)
     exit(-1);
 
+  // lab4-3
+  if(which_dev == 2) {
+    // timer interrupt
+    if(p->interval != 0 && ++p->passedticks == p->interval){
+      // p->passedticks = 0;    // 移至 kernel/sysproc.c的sys_sigreturn() 中,对定时函数handler防重入
+      // 使用trapframe后的一部分内容，trapframe大小为288B，因此只要在trapframe地址后288以上地址都可，此处512只是为了取整数幂
+      p->trapframecopy = p->trapframe + 512;
+      memmove(p->trapframecopy, p->trapframe, sizeof(struct trapframe));  // copy trapframe
+      p->trapframe->epc = p->handler;   // execute the handler when return to user space
+    }
+  }
+
   // give up the CPU if this is a timer interrupt.
   if(which_dev == 2)
     yield();
