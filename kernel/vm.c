@@ -45,6 +45,42 @@ void kvminit() {
   kvmmap(TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
 }
 
+pagetable_t create_kernel_pagetable() {
+  // 分配一个新页作为页表根
+  pagetable_t k_pagetable = (pagetable_t)kalloc();
+  memset(k_pagetable, 0, PGSIZE);
+
+  // 映射 UART 寄存器
+  kvmmap_new(k_pagetable, UART0, UART0, PGSIZE, PTE_R | PTE_W);
+
+  // 映射 Virtio MMIO 磁盘接口
+  kvmmap_new(k_pagetable, VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
+
+  // 映射 PLIC
+  kvmmap_new(k_pagetable, PLIC, PLIC, 0x400000, PTE_R | PTE_W);
+
+  // 映射内核代码段（可执行，且只读）
+  kvmmap_new(k_pagetable, KERNBASE, KERNBASE, (uint64)etext - KERNBASE, PTE_R | PTE_X);
+
+  // 映射内核数据段和物理内存（读写）
+  kvmmap_new(k_pagetable, (uint64)etext, (uint64)etext, PHYSTOP - (uint64)etext, PTE_R | PTE_W);
+
+  // 映射跳板代码（用于中断处理的最高虚拟地址）
+  kvmmap_new(k_pagetable, TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
+
+  return k_pagetable;
+}
+
+void sync_pagetable(pagetable_t userpagetable, pagetable_t kernel_pagetable) {
+  pagetable_t user_pa = (pagetable_t)PTE2PA(userpagetable[0]);
+  pagetable_t kernel_pa = (pagetable_t)PTE2PA(kernel_pagetable[0]);
+
+  for (int i = 0; i < 96; i++) {
+    // 将用户页表复制到内核页表中
+    kernel_pa[i] = user_pa[i];
+  }
+}
+
 // Switch h/w page table register to the kernel's page table,
 // and enable paging.
 void kvminithart() {
@@ -102,6 +138,11 @@ uint64 walkaddr(pagetable_t pagetable, uint64 va) {
 // does not flush TLB or enable paging.
 void kvmmap(uint64 va, uint64 pa, uint64 sz, int perm) {
   if (mappages(kernel_pagetable, va, sz, pa, perm) != 0) panic("kvmmap");
+}
+
+// add a mapping to the specified kernel page table.
+void kvmmap_new(pagetable_t k_pagetable, uint64 va, uint64 pa, uint64 sz, int perm) {
+  if (mappages(k_pagetable, va, sz, pa, perm) != 0) panic("kvmmap_new");
 }
 
 // translate a kernel virtual address to
@@ -243,6 +284,65 @@ void freewalk(pagetable_t pagetable) {
   kfree((void *)pagetable);
 }
 
+void travel(pagetable_t pagetable, int level, uint64 index) {
+  for(int i = 0; i < 512; i++) {
+    pte_t pte = pagetable[i];
+    char rwxu[4] = "----";
+    if(pte & PTE_R){
+      rwxu[0] = 'r';
+    }
+    if(pte & PTE_W){
+      rwxu[1] = 'w';
+    }
+    if(pte & PTE_X){
+      rwxu[2] = 'x';
+    }
+    if(pte & PTE_U){
+      rwxu[3] = 'u';
+    }
+
+    if((pte & PTE_V) && (pte & (PTE_R | PTE_W | PTE_X)) == 0) { // 非叶节点
+      uint64 child = PTE2PA(pte); // 将PTE转为为物理地址
+
+      for(int j = 0; j <= level; j++) {
+        if(j != level) {
+          printf("||   ");
+        }else {
+          printf("||");
+        }
+      }
+      
+      index = index + i;
+      index = index << 9;
+      printf("idx: %d: pa: %p, flags: %s\n", i, child, rwxu);
+      travel((pagetable_t)child, level + 1, index);
+      index = index >> 9;
+      index = index - i;
+    }else if(pte & PTE_V) {   // 叶子节点
+      uint64 child = PTE2PA(pte); // 将PTE转为为物理地址
+      for(int j = 0; j <= level; j++) {
+        if(j != level) {
+          printf("||   ");
+        }else {
+          printf("||");
+        }
+      }
+    
+      index = index + i;
+      index = index << 12;
+      printf("idx: %d: va: %p -> pa: %p, flags: %s\n", i, index, child, rwxu);
+      index = index >> 12;
+      index = index - i;
+    }
+  }
+}
+
+void vmprint(pagetable_t pagetable) {
+  printf("page table %p\n", pagetable);
+  uint64 index = 0x0000000000000000;
+  travel(pagetable, 0, index);
+}
+
 // Free user memory pages,
 // then free page-table pages.
 void uvmfree(pagetable_t pagetable, uint64 sz) {
@@ -316,21 +416,13 @@ int copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len) {
 // Copy len bytes to dst from virtual address srcva in a given page table.
 // Return 0 on success, -1 on error.
 int copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len) {
-  uint64 n, va0, pa0;
+  int ret;
 
-  while (len > 0) {
-    va0 = PGROUNDDOWN(srcva);
-    pa0 = walkaddr(pagetable, va0);
-    if (pa0 == 0) return -1;
-    n = PGSIZE - (srcva - va0);
-    if (n > len) n = len;
-    memmove(dst, (void *)(pa0 + (srcva - va0)), n);
+  w_sstatus(r_sstatus() | SSTATUS_SUM);
+  ret = copyin_new(pagetable, dst,srcva, len);
+  w_sstatus(r_sstatus() & ~SSTATUS_SUM);
 
-    len -= n;
-    dst += n;
-    srcva = va0 + PGSIZE;
-  }
-  return 0;
+  return ret;
 }
 
 // Copy a null-terminated string from user to kernel.
@@ -338,38 +430,13 @@ int copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len) {
 // until a '\0', or max.
 // Return 0 on success, -1 on error.
 int copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max) {
-  uint64 n, va0, pa0;
-  int got_null = 0;
+  int ret;
 
-  while (got_null == 0 && max > 0) {
-    va0 = PGROUNDDOWN(srcva);
-    pa0 = walkaddr(pagetable, va0);
-    if (pa0 == 0) return -1;
-    n = PGSIZE - (srcva - va0);
-    if (n > max) n = max;
+  w_sstatus(r_sstatus() | SSTATUS_SUM);
+  ret = copyinstr_new(pagetable, dst,srcva, max);
+  w_sstatus(r_sstatus() & ~SSTATUS_SUM);
 
-    char *p = (char *)(pa0 + (srcva - va0));
-    while (n > 0) {
-      if (*p == '\0') {
-        *dst = '\0';
-        got_null = 1;
-        break;
-      } else {
-        *dst = *p;
-      }
-      --n;
-      --max;
-      p++;
-      dst++;
-    }
-
-    srcva = va0 + PGSIZE;
-  }
-  if (got_null) {
-    return 0;
-  } else {
-    return -1;
-  }
+  return ret;
 }
 
 // check if use global kpgtbl or not
