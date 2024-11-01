@@ -68,7 +68,7 @@ kfree(void *pa)
   int cpu_id = cpuid();
   pop_off();
 
-  // 将对应的空闲页放入空闲列表中
+  // 将空闲页插入到对应 CPU 的空闲列表中
   acquire(&kmems[cpu_id].lock);
   r->next = kmems[cpu_id].freelist;
   kmems[cpu_id].freelist = r;
@@ -83,36 +83,35 @@ kalloc(void)
 {
   struct run *r;
 
-  // 获取当前CPU编号
+  // 获取当前 CPU 编号
   push_off();
   int cpu_id = cpuid();
   pop_off();
 
+  // 尝试从当前 CPU 的空闲列表中分配内存块
   acquire(&kmems[cpu_id].lock);
   r = kmems[cpu_id].freelist;
 
-  // 如果当前CPU有空闲内存块
-  if (r) {
+  if (r) {  // 当前 CPU 有空闲块
     kmems[cpu_id].freelist = r->next;
     release(&kmems[cpu_id].lock);
-  } else {  // 如果当前CPU没有空闲内存块
+  } else {  // 当前 CPU 无空闲块，尝试从其他 CPU 的列表中获取
     release(&kmems[cpu_id].lock);
     for (int i = 0; i < NCPU; i++) {
       if (i == cpu_id) continue;
-      
+
       acquire(&kmems[i].lock);
       r = kmems[i].freelist;
-      if (r) {
+      if (r) {  // 找到空闲块，更新链表并释放锁
         kmems[i].freelist = r->next;
         release(&kmems[i].lock);
         break;
       } else {
         release(&kmems[i].lock);
       }
-
-      // 所有CPU都没有空闲块时，返回0
+      // 如果所有 CPU 都无空闲块，返回 0
       if (i == NCPU - 1) return 0;
-    }
+    }  
   }
 
   if(r)
