@@ -111,6 +111,41 @@ walkaddr(pagetable_t pagetable, uint64 va)
   return pa;
 }
 
+// lab - cow
+uint64 walkcowaddr(pagetable_t pagetable, uint64 va) {
+  pte_t *pte;
+  uint64 pa;
+  char* mem;
+  uint flags;
+  if(va >= MAXVA)
+    return 0;
+  pte = walk(pagetable, va, 0);
+  if(pte == 0)
+    return 0;
+  if((*pte & PTE_V) == 0)
+    return 0;
+  if((*pte & PTE_U) == 0)
+    return 0;
+  pa = PTE2PA(*pte);
+
+  if((*pte & PTE_W) == 0) {     // 判断写标志位是否没有
+    // pte without COW flag cannot allocate page
+    if((*pte & PTE_COW) == 0)
+      return 0;
+    if((mem = kalloc()) == 0)     // 分配新的物理页
+      return 0;
+    memmove(mem, (void*)pa, PGSIZE);    // 拷贝页表内容
+    flags = (PTE_FLAGS(*pte) & (~PTE_COW)) | PTE_W;    // 更新标志位
+    uvmunmap(pagetable, PGROUNDDOWN(va), 1, 1);    // 取消原映射
+    if (mappages(pagetable, PGROUNDDOWN(va), PGSIZE, (uint64)mem, flags) != 0) {    // 更新新映射
+      kfree(mem);
+      return 0;
+    }
+    return (uint64)mem;   // COW情况下返回新物理地址
+  }
+  return pa;
+}
+
 // add a mapping to the kernel page table.
 // only used when booting.
 // does not flush TLB or enable paging.
@@ -311,22 +346,25 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
+  // char *mem;   // lab cow
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
       panic("uvmcopy: pte should exist");
     if((*pte & PTE_V) == 0)
       panic("uvmcopy: page not present");
+
     pa = PTE2PA(*pte);
-    flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
+    flags = (PTE_FLAGS(*pte) & (~PTE_W)) | PTE_COW;
+    *pte = PA2PTE(pa) | flags;    // update old pte - lab cow
+
+    // 将父进程的物理页映射到子进程页表项中
+    if(mappages(new, i, PGSIZE, pa, flags) != 0){
       goto err;
     }
+    
+    // 物理页引用次数加一
+    increfcnt(pa);
   }
   return 0;
 
@@ -358,7 +396,7 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
-    pa0 = walkaddr(pagetable, va0);
+    pa0 = walkcowaddr(pagetable, va0);
     if(pa0 == 0)
       return -1;
     n = PGSIZE - (dstva - va0);
