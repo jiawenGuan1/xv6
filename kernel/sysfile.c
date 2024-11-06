@@ -283,6 +283,41 @@ create(char *path, short type, short major, short minor)
   return ip;
 }
 
+// 递归跟踪符号链接
+// 调用者必须持有 ip->lock
+// 当函数返回时，调用者将持有返回的 inode（即目标文件）的 ip->lock
+static struct inode* follow_symlink(struct inode *ip) {
+  uint inums[NSYMLINK];  // 用于记录符号链接的 inode numbers
+  int i, j;
+  char target[MAXPATH];  // 存储符号链接目标路径
+
+  for(i = 0; i < NSYMLINK; i++) {
+    inums[i] = ip->inum;  // 记录当前 inode 的编号
+    // 从符号链接文件中读取目标路径
+    if(readi(ip, 0, (uint64)target, 0, MAXPATH) <= 0) {
+      iunlockput(ip);  // 释放当前 inode 的锁
+      return 0;  // 如果读取失败，返回 0
+    }
+    iunlockput(ip);  // 读取后释放当前符号链接的 inode 锁
+    // 获取目标路径对应的 inode
+    if((ip = namei(target)) == 0){
+      return 0;  // 如果路径不存在，返回 0
+    }
+    // 检查符号链接是否形成了循环
+    for(j = 0; j <= i; j++) {
+      if(ip->inum == inums[j]) {
+        return 0;  // 如果成环，返回 0
+      }
+    }
+    ilock(ip);  // 锁定目标文件的 inode
+    if(ip->type != T_SYMLINK) {
+      return ip;  // 如果目标文件不是符号链接，返回目标文件的 inode
+    }
+  }
+  iunlockput(ip);  // 超过最大递归深度时释放当前 inode 锁
+  return 0;  // 如果超过最大深度，返回 0
+}
+
 uint64
 sys_open(void)
 {
@@ -316,12 +351,24 @@ sys_open(void)
     }
   }
 
+  // 处理设备类型文件
   if(ip->type == T_DEVICE && (ip->major < 0 || ip->major >= NDEV)){
     iunlockput(ip);
     end_op();
     return -1;
   }
 
+  // 处理符号链接
+  if(ip->type == T_SYMLINK && (omode & O_NOFOLLOW) == 0) {
+    if((ip = follow_symlink(ip)) == 0) {
+      // 如果跟踪符号链接失败，这里不需要调用 iunlockput() 释放锁
+      // 因为在 follow_symlink() 函数内已经释放了锁
+      end_op();  // 结束操作
+      return -1;  // 返回错误
+    }
+  }
+
+  // 分配文件对象
   if((f = filealloc()) == 0 || (fd = fdalloc(f)) < 0){
     if(f)
       fileclose(f);
@@ -482,5 +529,33 @@ sys_pipe(void)
     fileclose(wf);
     return -1;
   }
+  return 0;
+}
+
+uint sys_symlink(void) {
+  // 获取参数
+  char target[MAXPATH], path[MAXPATH];
+  struct inode *ip;
+  int n;
+  if((n = argstr(0, target, MAXPATH)) < 0 || argstr(1, path, MAXPATH) < 0) 
+    return -1;
+  
+  begin_op();   // 开启文件系统操作
+
+  // 创建一个inode，设置其类型为T_SYMLINK
+  if((ip = create(path, T_SYMLINK, 0, 0)) == 0) {
+    end_op();
+    return -1;
+  }
+
+  // 将目标路径target写入到新创建的符号链接文件中
+  if(writei(ip, 0, (uint64)target, 0, n) != n) {
+    iunlockput(ip);
+    end_op();
+    return -1;
+  }
+
+  iunlockput(ip);
+  end_op();   // 结束文件系统操作
   return 0;
 }

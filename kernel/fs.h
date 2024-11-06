@@ -5,6 +5,8 @@
 #define ROOTINO  1   // root i-number
 #define BSIZE 1024  // block size
 
+#define NSYMLINK 10   // the max depth of symlinks
+
 // Disk layout:
 // [ boot block | super block | log | inode blocks |
 //                                          free bit map | data blocks]
@@ -24,9 +26,9 @@ struct superblock {
 
 #define FSMAGIC 0x10203040
 
-#define NDIRECT 12
-#define NINDIRECT (BSIZE / sizeof(uint))
-#define MAXFILE (NDIRECT + NINDIRECT)
+#define NDIRECT 11    // 直接索引节点个数由12改为11，腾出一个位置给二级索引节点
+#define NINDIRECT (BSIZE / sizeof(uint))    // 一级索引节点可以指向的磁盘块个数
+#define MAXFILE (NDIRECT + NINDIRECT + NINDIRECT * NINDIRECT)   // 单个文件最多可以占据的磁盘块数
 
 // On-disk inode structure
 struct dinode {
@@ -35,7 +37,7 @@ struct dinode {
   short minor;          // Minor device number (T_DEVICE only)
   short nlink;          // Number of links to inode in file system
   uint size;            // Size of file (bytes)
-  uint addrs[NDIRECT+1];   // Data block addresses
+  uint addrs[NDIRECT+2];   // Data block addresses
 };
 
 // Inodes per block.
