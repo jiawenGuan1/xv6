@@ -19,6 +19,6 @@ xv6 是 MIT 开发的一个教学用的完整的类 Unix 操作系统，并且�
 - [x] [cow]()
 - [x] [thread]()
 - [x] [lock](https://github.com/jiawenGuan1/xv6-MIT-6.S081/tree/lock)（HITSZ课内实验）
-- [ ]  [fs]()
+- [x]  [fs]()
 - [ ]  [mmap]()
 - [ ]  [network]()
