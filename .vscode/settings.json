@@ -1,0 +1,11 @@
+{
+    "files.associations": {
+        "memlayout.h": "c",
+        "limits": "c",
+        "*.tcc": "c",
+        "spinlock.h": "c",
+        "sleeplock.h": "c",
+        "fs.h": "c"
+    },
+    "C_Cpp.errorSquiggles": "disabled"
+}

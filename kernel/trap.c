@@ -5,6 +5,10 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "sleeplock.h"
+#include "fs.h"
+#include "file.h"
+#include "fcntl.h"
 
 struct spinlock tickslock;
 uint ticks;
@@ -67,7 +71,41 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
+  } else if(r_scause() == 12 || r_scause() == 13 || r_scause() == 15) {
+    char *pa;
+    uint64 va = PGROUNDDOWN(r_stval());
+    struct vm_area *vma = 0;
+    int flags = PTE_U;
+    // find the VMA
+    for(int i = 0; i < NVMA; i++) {
+      if(p->vma[i].addr && va >= p->vma[i].addr && va < p->vma[i].addr + p->vma[i].len){
+        vma = &p->vma[i];
+        break;
+      }
+    }
+    if(!vma)  goto err;
+    // set write flag and dirty flag to the mapped page's PTE
+    if(r_scause() == 15 && (vma->prot & PROT_WRITE) && walkaddr(p->pagetable, va)){
+      if(uvmsetdirtywrite(p->pagetable, va))  goto err;
+    } else {
+      if((pa = kalloc()) == 0)  goto err;
+      memset(pa, 0, PGSIZE);
+      ilock(vma->f->ip);
+      if(readi(vma->f->ip, 0, (uint64)pa, va - vma->addr + vma->offset, PGSIZE) < 0){
+        iunlock(vma->f->ip);
+        goto err;
+      }
+      iunlock(vma->f->ip);
+      if((vma->prot & PROT_READ)) flags |= PTE_R;
+      if(r_scause() == 15 && (vma->prot & PROT_WRITE))  flags |= PTE_W | PTE_D;
+      if((vma->prot & PROT_EXEC)) flags |= PTE_X;
+      if(mappages(p->pagetable, va, PGSIZE, (uint64)pa, flags) != 0){
+        kfree(pa);
+        goto err;
+      }
+    }
   } else {
+err:
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     p->killed = 1;
